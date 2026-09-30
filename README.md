@@ -2,7 +2,7 @@
 
 面向电商订单 CSV 的独立工程，目标是完成口径确认、三角色协作、受限 Python 执行、独立数值核验和跨会话业务记忆。
 
-> 当前状态：本机 Docker、PostgreSQL 与队列联动的固定三角色演示已通过真实集成和浏览器验收；MiMo/DeepSeek 模型适配与一键切换已实现（见 [模型配置](docs/operations/模型配置与切换.md)），两个模型已完成真实三角色调用与对照评测（见 [真实模型对照](docs/development/2026-09-28-真实模型对照评测.md)）。详见 [当前状态](docs/development/当前状态.md) 和 [四页面运行](docs/operations/四页面本地演示.md)。
+> 当前状态：本机 Docker、PostgreSQL 与队列联动的固定三角色演示已通过真实集成和浏览器验收；MiMo/DeepSeek 模型适配与一键切换已实现（见 [模型配置](docs/operations/模型配置与切换.md)），两个模型已完成真实三角色调用与对照评测（见 [真实模型对照](docs/development/2026-09-28-真实模型对照评测.md)）。核验通过后服务端确定性生成最多三张图表与模板化说明，上传数据时写入待确认的字段语义记忆（见 [图表说明与字段语义](docs/development/2026-09-30-图表说明与字段语义.md)）；GitHub Actions 执行 ruff、离线单元测试与前端构建。详见 [当前状态](docs/development/当前状态.md) 和 [四页面运行](docs/operations/四页面本地演示.md)。
 
 ## 开发环境与验证
 
@@ -24,7 +24,8 @@ python -B -m unittest discover -s tests/datalab -v
 - `examples/`：公开模拟订单和演示输入。
 - `scripts/`：构建和辅助脚本；含专用镜像、固定演示、服务启动与真实集成脚本。
 - `docs/`：设计、运行、开发记录和许可证资料，按职责分类。
-- `frontend/`：React 四页面；`evals/` 在评测轮次有实际内容时创建。
+- `frontend/`：React 四页面。
+- `evals/`：固定种子回归与真实模型对照、全链路冒烟脚本（付费调用须授权）。
 - `artifacts/`、`.tmp/`：忽略的运行产物和临时文件，按需创建。
 
 详细约定见 [AGENTS.md](AGENTS.md)、[项目实施计划](项目实施计划.md)、[目录职责](docs/目录职责.md) 和 [贡献说明](docs/development/贡献说明.md)。
