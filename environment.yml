@@ -1,0 +1,9 @@
+name: datalab
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - setuptools>=68
+  - tzdata
+# 已有环境不要重复创建；在该环境内安装根目录的 DataLab 包。

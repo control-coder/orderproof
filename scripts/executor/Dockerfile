@@ -1,0 +1,7 @@
+# 固定分析镜像；不安装模型、联网工具或运行时依赖。
+ARG PYTHON_IMAGE=python:3.12.12-slim-bookworm
+FROM ${PYTHON_IMAGE}
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+USER 65532:65532
+WORKDIR /output
+ENTRYPOINT ["python", "-I", "-B"]

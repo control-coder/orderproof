@@ -1,0 +1,57 @@
+# 静态检查、离线单元测试与前端构建；真实 Docker/PostgreSQL/应用集成由环境变量开关控制，CI 中不启用。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: 安装
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . "ruff==0.13.3"
+      - name: ruff（E9 + pyflakes）
+        run: python -m ruff check src tests scripts evals
+      - name: 单元测试（集成测试按开关跳过）
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -B -m unittest discover -s tests/datalab -v
+
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 安装
+        env:
+          # 构建不需要浏览器；浏览器流程验收在本机运行。
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci
+      - name: 构建
+        run: npm run build

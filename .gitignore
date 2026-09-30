@@ -1,0 +1,82 @@
+# 本地参考源码和资料：不跟踪，不作为安装或运行依赖。
+/poirot/
+/resource/
+/docs/upstream/
+/.poirot/
+
+# Python 缓存、构建和本地环境；项目只使用 conda datalab。
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+*.whl
+build/
+dist/
+venv/
+.venv/
+env/
+ENV/
+
+# 前端依赖与构建产物。
+node_modules/
+coverage/
+
+# 编辑器与本机工具配置。
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.codex/
+.codex
+.agents/
+.codemap/
+.codemaker/
+.claude/
+skills/
+.skill_id
+opencode.json
+
+# 测试和静态检查缓存。
+.pytest_cache/
+.pytest-workspace-tmp/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# 运行数据、数据库、临时文件与模型缓存不得提交。
+.tmp/
+# 仅根目录运行产物；src/datalab/artifacts 是业务包，不能被忽略。
+/artifacts/
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.tmp
+*.bak
+*.log
+.cache/
+
+# 本地密钥；仅允许提交无真实凭据的示例配置。
+.env
+.env.*
+!.env.example
+*.secret
+credentials.json
+
+# 本地设计资料与系统文件。
+design_docs/
+openspec/
+open_spec/
+.DS_Store
+Thumbs.db
+desktop.ini
