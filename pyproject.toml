@@ -1,7 +1,7 @@
 [project]
 name = "datalab"
 version = "0.1.0"
-description = "面向电商订单 CSV 的可验证分析助手"
+description = "OrderProof：面向电商订单 CSV 的可验证多角色分析助手"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12,<3.13"
@@ -23,7 +23,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-license-files = ["LICENSE", "THIRD_PARTY_LICENSES.md", "docs/licenses/第三方声明原文.md"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

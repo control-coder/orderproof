@@ -30,7 +30,7 @@ def main():
             handles.append(log)
             children.append(subprocess.Popen(command,cwd=root,env=env,stdout=log,stderr=log,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0))
-        print('DataLab 本地入口：http://127.0.0.1:18080；三角色模型见 .env，python -B scripts/switch_model.py 可切换',flush=True)
+        print('OrderProof 本地入口：http://127.0.0.1:18080；三角色模型见 .env，python -B scripts/switch_model.py 可切换',flush=True)
         while True:
             if any(child.poll() is not None for child in children):
                 raise RuntimeError('服务子进程退出，请检查 artifacts/local/logs；未自动更换端口或降级执行')

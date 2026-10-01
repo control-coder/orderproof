@@ -6,7 +6,7 @@ from datalab.roles.model_config import CHOICES, load_model_config, switch_provid
 
 
 def main():
-    parser = argparse.ArgumentParser(description='切换 DataLab 三角色使用的模型；不带参数时显示当前状态')
+    parser = argparse.ArgumentParser(description='切换 OrderProof 三角色使用的模型；不带参数时显示当前状态')
     parser.add_argument('provider', nargs='?', choices=CHOICES)
     args = parser.parse_args()
     if args.provider:
