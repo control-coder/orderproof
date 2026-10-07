@@ -176,7 +176,8 @@ class AppIntegrationTests(unittest.TestCase):
         with self.repository.connection() as connection:
             connection.execute("UPDATE datalab_tasks SET lease_until=now()-interval '1 minute' WHERE task_id=%s",(task.task_id,))
         self.repository.pending_ids()
-        self.assertEqual(self.repository.get_task(task.task_id)['state'],'FAILED')
+        # 租约过期时已有取消请求：按取消收尾，而不是恢复或记为失败。
+        self.assertEqual(self.repository.get_task(task.task_id)['state'],'CANCELLED')
         with self.assertRaises(RuntimeError):
             self.repository.save(task,first[0])
 
@@ -198,3 +199,121 @@ class AppIntegrationTests(unittest.TestCase):
         response=self.client.post(self.base+'/memories/'+pending+'/confirm',
                                   json={'dataset_version':self.dataset,'expected_current_id':None})
         self.assertEqual(response.status_code,409)
+
+    def expire_lease(self,task_id):
+        with self.repository.connection() as connection:
+            connection.execute("UPDATE datalab_tasks SET lease_until=now()-interval '1 minute' WHERE task_id=%s",(task_id,))
+
+    def new_task(self,question='围栏与恢复'):
+        from datalab.orchestration.workflow import Task
+        task=Task(self.project,self.dataset,question)
+        self.repository.create_task(task,{'options':{},'mode':'guided-demo'})
+        return task
+
+    def test_lease_expiry_requeues_from_checkpoint_once_then_fails(self):
+        from datalab.orchestration.workflow import State
+        task=self.new_task()
+        first,row=self.repository.claim(task.task_id)
+        self.assertEqual(row['fence'],1)
+        task.move(State.PROFILING,'检查点')
+        self.repository.save(task,first)
+        self.expire_lease(task.task_id)
+        self.assertIn(task.task_id,self.repository.pending_ids())
+        requeued=self.repository.get_task(task.task_id)
+        self.assertEqual((requeued['state'],requeued['lease_id'],requeued['snapshot']['state'],requeued['snapshot']['recoveries']),
+                         ('QUEUED',None,'PROFILING',1))
+        self.assertIn('从最近检查点恢复',requeued['snapshot']['timeline'][-1]['note'])
+        with self.assertRaises(RuntimeError):
+            self.repository.save(task,first)
+        # 第二次领取拿到更大的 fence；再次过期时恢复次数已用尽，按原规则失败并保留证据。
+        second,row=self.repository.claim(task.task_id)
+        self.assertEqual(row['fence'],2)
+        self.expire_lease(task.task_id)
+        self.repository.pending_ids()
+        failed=self.repository.get_task(task.task_id)
+        self.assertEqual((failed['state'],failed['snapshot']['failure']),('FAILED','WORKER_LEASE_EXPIRED'))
+
+    def test_artifact_index_rejects_stale_writers_and_only_moves_forward(self):
+        task=self.new_task()
+        run_id=str(uuid4())
+        old,_=self.repository.claim(task.task_id)
+        self.assertTrue(self.repository.add_artifact(task.task_id,run_id,'报告','runs/x/report.1.json',old))
+        self.assertFalse(self.repository.add_artifact(task.task_id,run_id,'报告','runs/x/report.1.json',old))
+        self.expire_lease(task.task_id)
+        self.repository.pending_ids()
+        new,row=self.repository.claim(task.task_id)
+        self.assertEqual(row['fence'],2)
+        self.assertTrue(self.repository.add_artifact(task.task_id,run_id,'报告','runs/x/report.2.json',new))
+        # 旧 worker 迟到的登记被拒绝，索引仍指向新领取者的文件。
+        with self.assertRaises(RuntimeError):
+            self.repository.add_artifact(task.task_id,run_id,'报告','runs/x/report.late.json',old)
+        with self.repository.connection() as connection:
+            rows=connection.execute('SELECT relative_path,fence FROM datalab_artifacts WHERE task_id=%s',(task.task_id,)).fetchall()
+        self.assertEqual([(item['relative_path'],item['fence']) for item in rows],[('runs/x/report.2.json',2)])
+
+    def test_crashed_worker_task_is_recovered_end_to_end(self):
+        from datalab.execution.runner import DockerRunner
+        from datalab.orchestration import worker
+        from datalab.orchestration.workflow import MetricSnapshot, Task
+        meta=self.repository.dataset(self.project,self.dataset)
+        metric=MetricSnapshot('recovery-test:v1',('paid',),'trusted-test',self.project,meta['dataset_family'],meta['schema_signature'])
+        task=Task(self.project,self.dataset,'恢复演练',metric=metric)
+        self.repository.create_task(task,{'options':{'kind':'ranking','group_by':'channel'},'mode':'guided-demo'})
+
+        class Crash(BaseException):
+            pass
+        # 执行阶段进程消失：租约不释放，检查点停在 EXECUTING。
+        with patch.object(DockerRunner,'execute_python',side_effect=Crash('worker killed')):
+            with self.assertRaises(Crash):
+                worker.process_task(task.task_id)
+        stuck=self.repository.get_task(task.task_id)
+        self.assertEqual((stuck['state'],stuck['snapshot']['state']),('EXECUTING','EXECUTING'))
+        self.assertIsNotNone(stuck['lease_id'])
+        self.expire_lease(task.task_id)
+        self.repository.pending_ids()
+        worker.process_task(task.task_id)
+        done=self.repository.get_task(task.task_id)
+        self.assertEqual(done['state'],'SUCCEEDED',done['snapshot'].get('failure'))
+        self.assertEqual((done['fence'],done['snapshot']['recoveries']),(2,1))
+        self.assertEqual(len(done['snapshot']['attempts']),1)
+        self.assertTrue(any('从最近检查点恢复' in item['note'] for item in done['snapshot']['timeline']))
+        with self.repository.connection() as connection:
+            rows=connection.execute('SELECT name,relative_path,fence FROM datalab_artifacts WHERE task_id=%s',(task.task_id,)).fetchall()
+        self.assertIn('核验报告.json',{item['name'] for item in rows})
+        self.assertEqual({item['fence'] for item in rows},{2})
+        report=next(item for item in rows if item['name']=='核验报告.json')
+        self.assertTrue(report['relative_path'].endswith('report.2.json'))
+
+    def test_idempotency_key_replay_conflict_and_race(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from datalab.orchestration.workflow import Task
+        payload={'dataset_version':self.dataset,'question':'按渠道汇总金额','options':{'kind':'ranking','group_by':'channel'}}
+        key='idem-'+uuid4().hex
+        first=self.client.post(self.base+'/tasks',json=payload,headers={'Idempotency-Key':key})
+        self.assertEqual(first.status_code,202,first.text)
+        again=self.client.post(self.base+'/tasks',json=payload,headers={'Idempotency-Key':key})
+        self.assertEqual(again.status_code,202,again.text)
+        self.assertEqual(again.json()['task_id'],first.json()['task_id'])
+        self.assertTrue(again.json()['replayed'])
+        self.assertNotIn('replayed',first.json())
+        with self.repository.connection() as connection:
+            count=connection.execute('SELECT count(*) AS n FROM datalab_tasks WHERE project_id=%s AND idempotency_key=%s',(self.project,key)).fetchone()['n']
+        self.assertEqual(count,1)
+        # 同一个键换了内容：拒绝，而不是悄悄返回另一个请求的任务。
+        changed=self.client.post(self.base+'/tasks',json={**payload,'question':'换一个问题'},headers={'Idempotency-Key':key})
+        self.assertEqual(changed.status_code,422,changed.text)
+        # 不带键的请求互不影响；非法键被拒绝。
+        one=self.client.post(self.base+'/tasks',json=payload).json()['task_id']
+        two=self.client.post(self.base+'/tasks',json=payload).json()['task_id']
+        self.assertNotEqual(one,two)
+        self.assertEqual(self.client.post(self.base+'/tasks',json=payload,headers={'Idempotency-Key':'has space'}).status_code,422)
+        # 并发重试同一个键：只创建一个任务，其余拿到同一个 task_id。
+        race='race-'+uuid4().hex
+
+        def submit(_):
+            task=Task(self.project,self.dataset,'并发幂等')
+            return self.repository.create_task(task,{'options':{},'mode':'guided-demo'},idempotency_key=race,request_hash='h')
+        with ThreadPoolExecutor(8) as pool:
+            results=list(pool.map(submit,range(8)))
+        self.assertEqual(len({item[0] for item in results}),1)
+        self.assertEqual(sum(1 for item in results if item[1]),1)

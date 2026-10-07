@@ -23,6 +23,13 @@ class ExecutionServices:
         return self.runner.execute_python(str(uuid4()), task.dataset_version, code, timeout, OutputSpec(),
             project_id=task.project_id, metric_version=task.plan.metric_version, cancelled=cancelled)
 
+    def code(self, manifest: ExecutionManifest) -> str:
+        """读回某次执行尝试实际运行的代码，恢复核验检查点时用于下一次反馈。"""
+        try:
+            return (self.runner.root / manifest.run_id / "input/analysis.py").read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
     def verify(self, task: Task, manifest: ExecutionManifest) -> VerificationReport:
         if not any(item is manifest for item in task.attempts):
             raise PermissionError("不能核验其他任务产物")

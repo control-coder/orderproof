@@ -171,6 +171,10 @@ class Task:
     budget: CallBudget = field(default_factory=CallBudget)
     # 每次角色调用一条：交接指纹与字段路径、用量、耗时和结果类别；不含提示、响应或数据内容。
     trace: list[dict] = field(default_factory=list)
+    # 租约过期后从检查点恢复的次数。
+    recoveries: int = 0
+    # 下一次 Analyst 调用要带的定位反馈。随检查点落库，恢复后不会丢失修正上下文。
+    feedback: dict | None = None
 
     def move(self, target: State, note: str):
         if self.state in TERMINAL:
@@ -188,6 +192,7 @@ class WorkflowServices(Protocol):
     def profile(self, task: Task) -> dict: ...
     def execute(self, task: Task, code: str, timeout: float, cancelled: threading.Event) -> ExecutionManifest: ...
     def verify(self, task: Task, manifest: ExecutionManifest) -> VerificationReport: ...
+    def code(self, manifest: ExecutionManifest) -> str: ...
 
 
 class Workflow:
@@ -258,6 +263,16 @@ class Workflow:
             task.confirmation = "请确认计算口径及纳入的订单状态；未经确认不默认使用猜测规则。"
             task.move(State.WAITING_CONFIRMATION, "缺少已确认指标口径，释放 worker")
             return task
+        metric, visible, handoff = self._prepare(task, profile)
+        proposal = self._call(task, Role.PLANNER, handoff)
+        if self._wait_if_confirmation(task, proposal):
+            return task
+        task.plan = self._accept_plan(task, proposal, metric)
+        task.feedback = None
+        return self._execute_loop(task, metric, visible, handoff, cancelled)
+
+    @staticmethod
+    def _prepare(task: Task, profile: dict):
         metric = task.metric
         if (metric.project_id != task.project_id or metric.dataset_family != profile["dataset_family"]
                 or metric.schema_signature != profile["schema_signature"] or not metric.source):
@@ -266,46 +281,85 @@ class Workflow:
         visible = model_profile(profile)
         handoff = {"task_id": task.task_id, "question": task.question, "dataset_version": task.dataset_version,
                    "profile": visible, "metric": model_metric(metric)}
-        proposal = self._call(task, Role.PLANNER, handoff)
-        if self._wait_if_confirmation(task, proposal):
-            return task
-        task.plan = self._accept_plan(task, proposal, metric)
-        feedback = None
+        return metric, visible, handoff
+
+    def recover(self, task: Task, *, cancelled: threading.Event | None = None) -> Task:
+        """租约过期后，由新的 worker 从最近一次落库的状态转换接续。
+
+        检查点就是每次状态转换时保存的任务快照。接续点由快照状态决定：
+        规划中重新规划；执行中带着保存的反馈重新生成代码（容器内的半成品不可复用）；
+        核验中直接重跑确定性的独立核验，不再花一次 Analyst 调用。
+        已用的调用、token 和时间不归零；检查点之后那次在途调用的用量没有落库，恢复后可能少记最多一次调用。
+        """
+        cancelled = cancelled or threading.Event()
+        if task.state not in (State.PROFILING, State.PLANNING, State.EXECUTING, State.VERIFYING):
+            raise ValueError("该状态没有可恢复的检查点")
+        task.budget.pause()
+        try:
+            profile = self.services.profile(task)
+            if task.state in (State.PROFILING, State.PLANNING) or task.plan is None:
+                if task.state == State.PROFILING:
+                    task.move(State.PLANNING, "恢复：重新规划")
+                return self._plan_and_execute(task, profile, cancelled)
+            metric, visible, handoff = self._prepare(task, profile)
+            pending = task.attempts[-1] if task.state == State.VERIFYING and task.attempts else None
+            if task.state == State.VERIFYING and pending is None:
+                raise ValueError("核验检查点缺少执行尝试")
+            return self._execute_loop(task, metric, visible, handoff, cancelled, pending=pending)
+        except BudgetExceeded:
+            task.failure = "BUDGET_EXHAUSTED"
+        except ModelCallError:
+            task.failure = "MODEL_ERROR"
+        except Exception:
+            task.failure = "WORKFLOW_ERROR"
+        if task.state not in TERMINAL:
+            task.move(State.FAILED, task.failure)
+        return task
+
+    def _execute_loop(self, task: Task, metric: MetricSnapshot, visible: dict, handoff: dict,
+                      cancelled: threading.Event, *, pending: ExecutionManifest | None = None) -> Task:
         while True:
             if self._check_cancel(task, cancelled):
                 return task
-            task.move(State.EXECUTING, "生成或修正受限分析代码")
-            analyst = self._call(task, Role.ANALYST, {
-                "task_id": task.task_id, "plan": role_plan(task.plan), "feedback": feedback,
-                "artifact_ids": [item.run_id for item in task.attempts],
-            })
-            if set(analyst) != {"code"} or not isinstance(analyst["code"], str) or not analyst["code"].strip():
-                raise ValueError("Analyst 必须返回代码")
-            if self._check_cancel(task, cancelled):
-                return task
-            tools = BoundTools(Role.ANALYST, {"execute_python": lambda code: self.services.execute(
-                task, code, min(30, task.budget.remaining_time()), cancelled)})
-            if task.budget.remaining_time() <= 0:
-                raise BudgetExceeded("执行前总时间已耗尽")
-            manifest = tools.call("execute_python", code=analyst["code"])
-            if manifest.dataset_version != task.dataset_version or manifest.metric_version != metric.version:
-                raise PermissionError("执行产物版本不匹配")
-            task.attempts.append(manifest)
-            if manifest.status == "CANCELLED":
-                task.move(State.CANCELLED, "容器执行已取消")
-                return task
-            if manifest.status != "COMPLETED":
-                if manifest.status == "FAILED" and task.code_corrections < 1:
-                    task.code_corrections += 1
-                    # 只回传本角色自己的代码和受控失败原因，不传宿主错误详情。
-                    feedback = {"type": "execution_failure", "artifact_id": manifest.run_id, "instruction": "最多一次代码修正",
-                                "reason": (manifest.reason or "脚本退出码非零或产物不符合要求")[:200],
-                                "previous_code": analyst["code"][:20000]}
-                    continue
-                task.failure = "EXECUTION_FAILED"
-                task.move(State.FAILED, "执行失败或代码修正次数已用尽")
-                return task
-            task.move(State.VERIFYING, "独立参考核验及只读角色审查")
+            if pending is None:
+                task.move(State.EXECUTING, "生成或修正受限分析代码")
+                analyst = self._call(task, Role.ANALYST, {
+                    "task_id": task.task_id, "plan": role_plan(task.plan), "feedback": task.feedback,
+                    "artifact_ids": [item.run_id for item in task.attempts],
+                })
+                if set(analyst) != {"code"} or not isinstance(analyst["code"], str) or not analyst["code"].strip():
+                    raise ValueError("Analyst 必须返回代码")
+                if self._check_cancel(task, cancelled):
+                    return task
+                tools = BoundTools(Role.ANALYST, {"execute_python": lambda code: self.services.execute(
+                    task, code, min(30, task.budget.remaining_time()), cancelled)})
+                if task.budget.remaining_time() <= 0:
+                    raise BudgetExceeded("执行前总时间已耗尽")
+                manifest = tools.call("execute_python", code=analyst["code"])
+                if manifest.dataset_version != task.dataset_version or manifest.metric_version != metric.version:
+                    raise PermissionError("执行产物版本不匹配")
+                task.attempts.append(manifest)
+                code = analyst["code"]
+                if manifest.status == "CANCELLED":
+                    task.move(State.CANCELLED, "容器执行已取消")
+                    return task
+                if manifest.status != "COMPLETED":
+                    if manifest.status == "FAILED" and task.code_corrections < 1:
+                        task.code_corrections += 1
+                        # 只回传本角色自己的代码和受控失败原因，不传宿主错误详情。
+                        task.feedback = {"type": "execution_failure", "artifact_id": manifest.run_id,
+                                         "instruction": "最多一次代码修正",
+                                         "reason": (manifest.reason or "脚本退出码非零或产物不符合要求")[:200],
+                                         "previous_code": code[:20000]}
+                        continue
+                    task.failure = "EXECUTION_FAILED"
+                    task.move(State.FAILED, "执行失败或代码修正次数已用尽")
+                    return task
+                task.move(State.VERIFYING, "独立参考核验及只读角色审查")
+            else:
+                # 恢复：已有完成的执行尝试，状态已是 VERIFYING，只需重跑确定性核验。
+                manifest, pending = pending, None
+                code = self.services.code(manifest)
             reviewer_tools = BoundTools(Role.REVIEWER, {"verify": lambda: self.services.verify(task, manifest)})
             check = reviewer_tools.call("verify")
             task.verifications.append(check)
@@ -318,8 +372,8 @@ class Workflow:
                 task.review_feedbacks += 1
                 # 不回传独立参考数值，防止代码照抄参考结果而失去核验意义。
                 # 只定位错误（字段路径、下载表的行列与问题类型），不给期望值。
-                feedback = {"type": "verification_failure", "artifact_id": manifest.run_id,
-                            "checks": check_feedback(check), "previous_code": analyst["code"][:20000]}
+                task.feedback = {"type": "verification_failure", "artifact_id": manifest.run_id,
+                                 "checks": check_feedback(check), "previous_code": code[:20000]}
                 continue
             # 核验只证明代码忠实于计划；Reviewer 只补足“计划是否读对问题”这一项。
             try:
@@ -365,7 +419,7 @@ class Workflow:
                 return task
             task.move(State.PLANNING, "Reviewer 驳回，Planner 修订计划")
             task.plan = revised
-            feedback = None
+            task.feedback = None
 
     @staticmethod
     def review_handoff(task_id: str, question: str, profile: dict, plan: AnalysisPlan,

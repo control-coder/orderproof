@@ -1,12 +1,14 @@
 """单用户本地接口；所有资源都先检查项目归属，不对公网承诺多租户认证。"""
 from dataclasses import asdict
+import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid4
 
 import psycopg
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -20,7 +22,7 @@ from datalab.orchestration.workflow import Task
 from datalab.roles.model_config import CHOICES, GUIDED, ModelConfigError, env_path, load_model_config, switch_provider
 from datalab.roles.runtime import CallBudget
 from datalab.settings import Settings
-from datalab.storage.repository import Repository
+from datalab.storage.repository import IdempotencyConflict, Repository
 
 
 class Payload(BaseModel):
@@ -45,6 +47,15 @@ class TaskInput(Payload):
     question: str = Field(min_length=1,max_length=4000)
     options: Options = Field(default_factory=Options)
     memory_id: UUID | None = None
+
+
+IDEMPOTENCY_KEY = re.compile(r'[!-~]{1,128}')
+
+
+def request_fingerprint(payload: TaskInput) -> str:
+    """同一个幂等键只对应同一份请求内容；用规范化 JSON 的哈希比较。"""
+    body = json.dumps(payload.model_dump(mode='json'), sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+    return hashlib.sha256(body.encode('utf-8')).hexdigest()
 
 
 class RuleInput(Payload):
@@ -237,7 +248,9 @@ def create_app(settings: Settings | None = None):
         return asdict(memory.invalidate(scoped(project_id,payload.dataset_version),str(memory_id),actor='local-user'))
 
     @app.post('/api/projects/{project_id}/tasks',status_code=202)
-    def create_task(project_id:UUID,payload:TaskInput):
+    def create_task(project_id:UUID,payload:TaskInput,idempotency_key:str|None=Header(default=None)):
+        if idempotency_key is not None and not IDEMPOTENCY_KEY.fullmatch(idempotency_key):
+            raise HTTPException(422,'Idempotency-Key 需为 1–128 位可见 ASCII 字符')
         scope=scoped(project_id,payload.dataset_version)
         options=payload.options.model_dump()
         # 预先验证类型、分组和期间，避免无效计划反复占用队列。
@@ -252,7 +265,16 @@ def create_app(settings: Settings | None = None):
                 raise ModelConfigError(f'{profile.provider} 尚未配置 API Key；请在 .env 中填写，或切换到固定演示')
             request={'options':options,'mode':'model','model':{'provider':profile.provider,'model':profile.model}}
             task.budget=CallBudget(config.max_calls,config.max_tokens,config.seconds)
-        repository.create_task(task,request)
+        try:
+            task_id,created=repository.create_task(task,request,idempotency_key=idempotency_key,
+                request_hash=request_fingerprint(payload) if idempotency_key else None)
+        except IdempotencyConflict as error:
+            raise HTTPException(422,str(error))
+        if not created:
+            # 重放：返回原任务，不再创建也不再派发（原任务若还没派发出去，dispatcher 会补发）。
+            row=repository.get_task(task_id,str(project_id))
+            return {'task_id':task_id,'state':row['state'],'dispatched':False,'replayed':True,
+                    'mode':row['request'].get('mode'),'model':row['request'].get('model')}
         return {'task_id':task.task_id,'state':'QUEUED','dispatched':enqueue(task.task_id),'mode':request['mode'],
                 'model':request.get('model')}
 

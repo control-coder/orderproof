@@ -24,7 +24,7 @@
 | `POST /api/projects/{project_id}/memories` | 提出指标口径候选：`dataset_version`、`name`、`definition`、`included_statuses`（`paid`/`refunded`/`cancelled`） |
 | `POST /api/projects/{project_id}/memories/{memory_id}/confirm` | `dataset_version`、`expected_current_id`（页面看到的当前版本） |
 | `POST /api/projects/{project_id}/memories/{memory_id}/invalidate` | 标记失效，保留内容与来源 |
-| `POST /api/projects/{project_id}/tasks` | 创建任务，返回 202 与 `task_id`、`dispatched`、`mode` |
+| `POST /api/projects/{project_id}/tasks` | 创建任务，返回 202 与 `task_id`、`dispatched`、`mode`。可带 `Idempotency-Key`（1–128 位可见 ASCII）：相同的键和内容返回原任务并附 `replayed: true`，相同的键不同内容返回 422 |
 | `GET /api/projects/{project_id}/tasks` | 任务列表 |
 | `GET /api/projects/{project_id}/tasks/{task_id}` | 状态、快照（时间线、计划、核验记录）、产物列表与分析说明 |
 | `POST /api/projects/{project_id}/tasks/{task_id}/cancel` | 请求取消 |

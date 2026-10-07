@@ -90,7 +90,16 @@ jobs:
           DATALAB_TEST_DATABASE_URL: ${{ env.DATALAB_CI_DATABASE_URL }}
         run: python -B -m unittest discover -s tests/datalab -p test_memory_postgres.py -v
       - name: 应用集成（Celery worker + PostgreSQL + Redis + Docker）
-        run: python -B scripts/test_app.py
+        run: |
+          python -B scripts/test_app.py > .tmp/test-app.log 2>&1 && { tail -n 15 .tmp/test-app.log; exit 0; }
+          code=$?
+          # 失败时把测试输出和 worker 日志尾部写成注解：日志下载需要仓库管理权限，注解无需登录即可查看。
+          msg=$( { tail -n 70 .tmp/test-app.log; echo '--- worker ---'; tail -n 40 .tmp/integration-worker.log 2>/dev/null; } | cut -c1-400)
+          msg="${msg//'%'/'%25'}"; msg="${msg//$''/'%0D'}"; msg="${msg//$'
+'/'%0A'}"
+          echo "::error title=应用集成失败::${msg}"
+          cat .tmp/test-app.log
+          exit $code
       - name: 固定种子评测（20 数值 + 8 记忆 + 8 故障）
         run: |
           python -B evals/run_suite.py | tee .tmp/fixed-seed-summary.json

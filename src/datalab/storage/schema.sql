@@ -21,3 +21,11 @@ CREATE TABLE IF NOT EXISTS datalab_artifacts (
     run_id uuid NOT NULL, name text NOT NULL, relative_path text NOT NULL,
     UNIQUE(task_id,run_id,name)
 );
+
+-- 可重复执行的增量列：旧库再运行一次 initialize 即可补齐，已有行取默认值。
+-- fence 是每次领取单调递增的围栏令牌；产物索引用它拒绝旧 worker 的迟到写入。
+ALTER TABLE datalab_tasks ADD COLUMN IF NOT EXISTS fence bigint NOT NULL DEFAULT 0;
+ALTER TABLE datalab_tasks ADD COLUMN IF NOT EXISTS idempotency_key text;
+ALTER TABLE datalab_tasks ADD COLUMN IF NOT EXISTS request_hash text;
+CREATE UNIQUE INDEX IF NOT EXISTS datalab_tasks_idempotency ON datalab_tasks(project_id,idempotency_key) WHERE idempotency_key IS NOT NULL;
+ALTER TABLE datalab_artifacts ADD COLUMN IF NOT EXISTS fence bigint NOT NULL DEFAULT 0;

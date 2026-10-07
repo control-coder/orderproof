@@ -66,6 +66,9 @@ def process_task(task_id: str):
         workflow = Workflow(RoleRuntime(role_backend(row['request'])), ExecutionServices(runner))
         if task.state == State.WAITING_CONFIRMATION:
             task = workflow.resume(task,task.metric,cancelled=cancelled)
+        elif task.state != State.QUEUED:
+            # 上一个 worker 的租约过期，任务带着检查点重新排队：从快照状态接续。
+            task = workflow.recover(task,cancelled=cancelled)
         else:
             task = workflow.run(task,cancelled=cancelled)
         # 所有索引来自本任务实际尝试；路径不接受模型直接指定。
@@ -78,7 +81,7 @@ def process_task(task_id: str):
                 names.update({'结果.json':'output/result.json','结果表.csv':'output/table.csv'})
             for name, path in names.items():
                 if (folder / path).is_file():
-                    repository.add_artifact(task.task_id,manifest.run_id,name,f'runs/{manifest.run_id}/{path}')
+                    repository.add_artifact(task.task_id,manifest.run_id,name,f'runs/{manifest.run_id}/{path}',token)
         derived, derived_error = None, None
         if task.state == State.SUCCEEDED and task.attempts:
             # 图表与说明只从已通过核验的 result.json 确定性派生；失败不推翻核验结论，只记录原因。
@@ -89,7 +92,7 @@ def process_task(task_id: str):
                                  included_statuses=task.metric.included_statuses, currency=version.currency,
                                  data_range=(version.profile['time_min'], version.profile['time_max']))
                 for name, path in derived['files'].items():
-                    repository.add_artifact(task.task_id, latest.run_id, name, f'runs/{latest.run_id}/{path}')
+                    repository.add_artifact(task.task_id, latest.run_id, name, f'runs/{latest.run_id}/{path}', token)
             except Exception:
                 derived, derived_error = None, '图表或说明生成失败；核验结论不受影响'
         if task.attempts:
@@ -109,9 +112,12 @@ def process_task(task_id: str):
                       'narrative':derived['narrative'] if derived else None,
                       'charts':derived['charts'] if derived else [],'derived_error':derived_error,
                       'trace':task.trace}
-            path=runner.root/latest.run_id/'report.json'
+            # 报告文件名带 fence：旧 worker 迟到的写入落在自己的文件里，不会覆盖新领取者的报告；
+            # 索引行按 fence 单调更新，下载只认索引。
+            report_file=f"report.{row['fence']}.json"
+            path=runner.root/latest.run_id/report_file
             path.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
-            repository.add_artifact(task.task_id,latest.run_id,'核验报告.json',f'runs/{latest.run_id}/report.json')
+            repository.add_artifact(task.task_id,latest.run_id,'核验报告.json',f'runs/{latest.run_id}/{report_file}',token)
         task.budget.pause()
         repository.save(task,token,release=True)
         if task.state == State.CANCELLED and task.attempts:
