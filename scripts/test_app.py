@@ -10,7 +10,9 @@ def main():
     root=Path(__file__).resolve().parents[1]
     temporary=(root/'.tmp').resolve()
     temporary.mkdir(exist_ok=True)
-    env=dict(os.environ,DATALAB_APP_TESTS='1',PYTHONDONTWRITEBYTECODE='1')
+    # worker 是独立进程，看不到测试里打的补丁。给它一个假密钥：模型任务停在确认点、不会发出请求，
+    # 同时让有无本机 .env 的环境（本机与 CI）行为一致，也保证测试不会用到真实密钥。
+    env=dict(os.environ,DATALAB_APP_TESTS='1',PYTHONDONTWRITEBYTECODE='1',DATALAB_MIMO_API_KEY='test-key-not-real')
     with (temporary/'integration-worker.log').open('w',encoding='utf-8') as log:
         process=subprocess.Popen([sys.executable,'-B','-m','celery','-A','datalab.orchestration.worker:celery_app',
             'worker','--pool=solo','--concurrency=1','--loglevel=WARNING','--without-gossip','--without-mingle'],
