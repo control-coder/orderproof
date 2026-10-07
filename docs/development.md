@@ -106,7 +106,7 @@ npm run build --prefix frontend
 - integration：GitHub 服务容器提供 PostgreSQL 17 与 Redis 7，作业内构建 `scripts/executor` 镜像，依次运行真实 Docker 隔离与模拟模型闭环、PostgreSQL 记忆、Celery 应用集成和固定种子评测（20 数值、8 记忆、8 故障）。不调用模型，不需要密钥；`scripts/ci_prepare.py` 只按环境变量生成一次性运行配置。评测 JSON 与 worker 日志作为构件保留 14 天。
 - frontend：执行 `npm ci`（跳过 Playwright 浏览器下载）和 `npm run build`（`tsc --noEmit` + Vite）。
 
-浏览器流程、真实模型评测和十万行规模验证不在 CI 中运行。integration 作业在 Linux 托管 runner 上运行，与本机 Windows 的 Docker Desktop 环境不同，首次结果以 Actions 页面为准。
+浏览器流程、真实模型评测和十万行规模验证不在 CI 中运行。integration 作业在 Linux 托管 runner 上运行，与本机 Windows 的 Docker Desktop 环境不同。它第一次运行就暴露了一个本机看不到的问题：测试 worker 依赖本机 .env，CI 里没有而失败；现在测试给 worker 生成独立配置，并在移走本机 .env 的条件下复现验证。修正后该作业在真实 Linux runner 上通过，覆盖受限容器、PostgreSQL、Redis/Celery、租约过期后的恢复和固定种子评测。失败时测试输出和 worker 日志会写成注解。
 
 ## 排障
 

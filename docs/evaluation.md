@@ -249,4 +249,4 @@ python -B evals/report.py artifacts/evals/heldout-single-vs-roles.json --markdow
 - “驳回后交回 Planner 复核”和“审查降级”两条路径在真实模型运行中没有被触发，只有离线测试覆盖。
 - 结果只针对 `mimo-v2.6-flash` 和 `deepseek-flash`。开发题集的对照只跑一批；留出集跑了 5 批，但只有 24 题，区间仍然很宽。
 - 图表字节级可复现性依赖字体，Linux 字体下的输出没有比较过。
-- 只在一台 Windows 主机上验证过；生产部署、公网认证、多用户与跨平台运行都不在已验证范围内。
+- 开发和评测在一台 Windows 主机上进行；受限容器、应用集成和固定种子评测另在 GitHub Actions 的 Linux runner 上通过。模型评测、浏览器流程和十万行规模只在本机跑过。生产部署、公网认证、多用户不在已验证范围内。
