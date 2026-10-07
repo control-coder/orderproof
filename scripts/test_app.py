@@ -10,9 +10,12 @@ def main():
     root=Path(__file__).resolve().parents[1]
     temporary=(root/'.tmp').resolve()
     temporary.mkdir(exist_ok=True)
-    # worker 是独立进程，看不到测试里打的补丁。给它一个假密钥：模型任务停在确认点、不会发出请求，
-    # 同时让有无本机 .env 的环境（本机与 CI）行为一致，也保证测试不会用到真实密钥。
-    env=dict(os.environ,DATALAB_APP_TESTS='1',PYTHONDONTWRITEBYTECODE='1',DATALAB_MIMO_API_KEY='test-key-not-real')
+    # 根因：CI 没有 .env，worker 为模型任务读取配置时直接报“缺少配置文件”；本机有 .env 所以一直没暴露。
+    # 这里给 worker 一份由 .env.example 生成的独立配置和假密钥：本机与 CI 行为一致，也绝不会用到真实密钥。
+    env_file=temporary/'worker.env'
+    env_file.write_text((root/'.env.example').read_text(encoding='utf-8'),encoding='utf-8')
+    env=dict(os.environ,DATALAB_APP_TESTS='1',PYTHONDONTWRITEBYTECODE='1',DATALAB_ENV_FILE=str(env_file),
+             DATALAB_MIMO_API_KEY='test-key-not-real',DATALAB_DEEPSEEK_API_KEY='')
     with (temporary/'integration-worker.log').open('w',encoding='utf-8') as log:
         process=subprocess.Popen([sys.executable,'-B','-m','celery','-A','datalab.orchestration.worker:celery_app',
             'worker','--pool=solo','--concurrency=1','--loglevel=WARNING','--without-gossip','--without-mingle'],
