@@ -94,9 +94,8 @@ jobs:
           python -B scripts/test_app.py > .tmp/test-app.log 2>&1 && { tail -n 15 .tmp/test-app.log; exit 0; }
           code=$?
           # 失败时把测试输出和 worker 日志尾部写成注解：日志下载需要仓库管理权限，注解无需登录即可查看。
-          msg=$( { tail -n 70 .tmp/test-app.log; echo '--- worker ---'; tail -n 40 .tmp/integration-worker.log 2>/dev/null; } | cut -c1-400)
-          msg="${msg//'%'/'%25'}"; msg="${msg//$''/'%0D'}"; msg="${msg//$'
-'/'%0A'}"
+          # 注解里不保留换行，用 | 连接各行。
+          msg=$( { tail -n 70 .tmp/test-app.log; echo '--- worker ---'; tail -n 40 .tmp/integration-worker.log 2>/dev/null; } | cut -c1-300 | sed 's/%/%25/g' | paste -sd'|')
           echo "::error title=应用集成失败::${msg}"
           cat .tmp/test-app.log
           exit $code
