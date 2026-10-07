@@ -112,18 +112,19 @@ class ModelBackend:
         content, tokens = self.client.complete(messages, timeout=max(1.0, min(timeout, request_timeout)),
                                                max_tokens=max(1, min(token_limit, output_limit)))
         reply = parse_object(content)
+        usage = dict(self.client.usage[-1]) if self.client.usage else None
         if role == Role.PLANNER:
-            return ModelReply(self._plan(reply, handoff), tokens)
+            return ModelReply(self._plan(reply, handoff), tokens, usage)
         if role == Role.ANALYST:
             code = reply.get('code')
             if set(reply) != {'code'} or not isinstance(code, str) or not code.strip():
                 raise ModelCallError('Analyst 输出不符合代码契约')
             match = FENCE.match(code)
             # 模型只写 analyze 函数；计划常量与输出读写由服务端框架提供，组装后仍进入受限容器与独立核验。
-            return ModelReply({'code': assemble(handoff['plan'], match.group(1) if match else code)}, tokens)
+            return ModelReply({'code': assemble(handoff['plan'], match.group(1) if match else code)}, tokens, usage)
         if set(reply) != {'accepted', 'feedback'} or type(reply['accepted']) is not bool or not isinstance(reply['feedback'], str):
             raise ModelCallError('Reviewer 输出不符合审查契约')
-        return ModelReply(reply, tokens)
+        return ModelReply(reply, tokens, usage)
 
     @staticmethod
     def _plan(reply: dict, handoff: dict) -> dict:

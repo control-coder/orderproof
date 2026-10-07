@@ -96,16 +96,17 @@ npm run build --prefix frontend
 
 运行完后用 `Remove-Item Env:DATALAB_DOCKER_TESTS` 清除开关。`scripts/test_postgres.py` 只清理自己创建的容器；`DATALAB_POSTGRES_TESTS=1` 配合 `DATALAB_TEST_DATABASE_URL` 也可以指向一个专用测试库，但不要指向含业务数据的库。
 
-`evals/` 下其余脚本会调用付费模型，见 [评测与验证](evaluation.md)。
+`evals/` 下其余脚本会调用付费模型，见 [评测与验证](evaluation.md)；`evals/report.py`、`evals/stats.py` 与 `evals/heldout.py` 不发请求，其统计和题集冻结由 `tests/datalab/test_eval_stats.py` 离线检查。
 
 ## CI
 
 `.github/workflows/ci.yml` 在推送到 `main` 和每个 Pull Request 时运行：
 
 - backend：安装本包与 `ruff==0.13.3`，执行 `ruff check`（E9 + pyflakes）和离线单元测试。
+- integration：GitHub 服务容器提供 PostgreSQL 17 与 Redis 7，作业内构建 `scripts/executor` 镜像，依次运行真实 Docker 隔离与模拟模型闭环、PostgreSQL 记忆、Celery 应用集成和固定种子评测（20 数值、8 记忆、8 故障）。不调用模型，不需要密钥；`scripts/ci_prepare.py` 只按环境变量生成一次性运行配置。评测 JSON 与 worker 日志作为构件保留 14 天。
 - frontend：执行 `npm ci`（跳过 Playwright 浏览器下载）和 `npm run build`（`tsc --noEmit` + Vite）。
 
-真实 Docker、数据库、应用集成与浏览器流程不在 CI 中运行。
+浏览器流程、真实模型评测和十万行规模验证不在 CI 中运行。integration 作业在 Linux 托管 runner 上运行，与本机 Windows 的 Docker Desktop 环境不同，首次结果以 Actions 页面为准。
 
 ## 排障
 

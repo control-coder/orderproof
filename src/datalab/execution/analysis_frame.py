@@ -39,9 +39,26 @@ def _cell(value):
     return value
 
 
+def _shape(result, kind):
+    # 只删除当前分析类型不应出现的键（非 share 的行级 share、行内 comparison、非 comparison 的顶层 comparison），
+    # 不改任何值、不补缺失的键；数值仍由独立参考逐项核验。
+    if not isinstance(result, dict):
+        return result
+    if kind != "comparison":
+        result.pop("comparison", None)
+    rows = result.get("rows")
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict):
+                row.pop("comparison", None)
+                if kind != "share":
+                    row.pop("share", None)
+    return result
+
+
 with open("/input/orders.csv", encoding="utf-8", newline="") as _handle:
     _data = list(csv.DictReader(_handle))
-_result = analyze(_data, dict(PLAN))
+_result = _shape(analyze(_data, dict(PLAN)), PLAN["kind"])
 with open("/output/result.json", "w", encoding="utf-8") as _handle:
     json.dump(_result, _handle, ensure_ascii=False)
 if PLAN["kind"] == "quality":

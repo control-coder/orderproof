@@ -1,4 +1,5 @@
-# 静态检查、离线单元测试与前端构建；真实 Docker/PostgreSQL/应用集成由环境变量开关控制，CI 中不启用。
+# 静态检查、离线单元测试、真实服务集成（Docker 沙箱、PostgreSQL、Redis/Celery）与前端构建。
+# 集成作业不调用模型；浏览器流程仍只在本机运行。
 name: CI
 
 on:
@@ -34,6 +35,76 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python -B -m unittest discover -s tests/datalab -v
+
+  # 真实服务集成：Docker 沙箱隔离、PostgreSQL、Redis/Celery 与固定种子评测。
+  # 不调用任何模型，也不需要密钥；连接串都是本作业服务容器的一次性配置。
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: datalab
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: datalab
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U datalab -d datalab"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      DATALAB_CONFIG: ${{ github.workspace }}/.tmp/ci-runtime.json
+      DATALAB_CI_DATABASE_URL: postgresql://datalab:ci-only-password@127.0.0.1:5432/datalab
+      DATALAB_CI_BROKER_URL: redis://127.0.0.1:6379/0
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: 安装
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+      - name: 构建受限执行镜像
+        run: docker build -t datalab-executor:py312-v1 scripts/executor
+      - name: 生成运行配置并初始化数据库
+        run: python -B scripts/ci_prepare.py
+      - name: 容器隔离与模拟模型闭环（真实 Docker）
+        env:
+          DATALAB_DOCKER_TESTS: "1"
+        run: |
+          python -B -m unittest discover -s tests/datalab -p test_execution.py -v
+          python -B -m unittest discover -s tests/datalab -p test_model_backend.py -v
+      - name: 业务记忆（真实 PostgreSQL）
+        env:
+          DATALAB_POSTGRES_TESTS: "1"
+          DATALAB_TEST_DATABASE_URL: ${{ env.DATALAB_CI_DATABASE_URL }}
+        run: python -B -m unittest discover -s tests/datalab -p test_memory_postgres.py -v
+      - name: 应用集成（Celery worker + PostgreSQL + Redis + Docker）
+        run: python -B scripts/test_app.py
+      - name: 固定种子评测（20 数值 + 8 记忆 + 8 故障）
+        run: |
+          python -B evals/run_suite.py | tee .tmp/fixed-seed-summary.json
+          { echo '### 固定种子评测'; echo '```json'; cat .tmp/fixed-seed-summary.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: 上传评测与 worker 日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-evidence
+          path: |
+            artifacts/evals/fixed-seed.json
+            .tmp/integration-worker.log
+          if-no-files-found: ignore
+          retention-days: 14
 
   frontend:
     runs-on: ubuntu-24.04

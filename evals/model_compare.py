@@ -268,8 +268,8 @@ def finish(record, provider, truth, started):
     return record
 
 
-def numeric_job(lab, provider, arm, index, project, version, metric):
-    question, fields = QUESTIONS[index]
+def numeric_job(lab, provider, arm, index, project, version, metric, questions=QUESTIONS):
+    question, fields = questions[index]
     task = Task(project, version.dataset_version, question, metric=metric, budget=lab.budget())
     started = time.perf_counter()
     record = (lab.three_roles if arm == 'three_roles' else lab.single_agent)(provider, task)
@@ -337,47 +337,89 @@ def summarize(records):
     return rows
 
 
+def code_fingerprint():
+    """提示词文件指纹与提交号：多批结果合并前用来确认批次之间提示没有被改动。"""
+    import hashlib
+    import subprocess
+    prompts = hashlib.sha256((ROOT / 'src/datalab/roles/prompts.py').read_bytes()).hexdigest()
+    try:
+        commit = subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD'], cwd=ROOT, text=True, timeout=10).strip()
+        dirty = bool(subprocess.check_output(['git', 'status', '--porcelain', '--', 'src', 'evals'],
+                                             cwd=ROOT, text=True, timeout=10).strip())
+    except (OSError, subprocess.SubprocessError):
+        return prompts, None
+    return prompts, commit + ('+dirty' if dirty else '')
+
+
+def select_questions(split):
+    if split == 'dev':
+        return QUESTIONS, None
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import heldout
+    if heldout.fingerprint() != heldout.HELDOUT_SHA256:
+        raise SystemExit('留出题集与冻结指纹不符；不得在查看结果后修改题目（见 evals/heldout.py）')
+    return heldout.HELDOUT, heldout.HELDOUT_SHA256
+
+
+def build_jobs(args, lab, providers, questions, count):
+    """每批使用全新的项目与数据版本，批次之间不共享任何状态；返回 [((函数, 参数), 批次)]。"""
+    memory = MemoryService(lab.memory_store)
+    jobs = []
+    for batch in range(1, args.batches + 1):
+        project, version = lab.project(f'模型对照-数值-b{batch}')
+        scope = Scope(project, FAMILY, version.schema_signature)
+        entry = memory.confirm(scope, memory.propose(scope, 'metric', '成交额', {
+            'definition': RULES[0][0], 'included_statuses': ['paid']}, 'eval-trusted-preconfig').memory_id,
+            actor='trusted-eval', expected_current_id=None)
+        metric = memory.metric_snapshot(entry)
+        jobs += [((numeric_job, (lab, provider, arm, index, project, version, metric, questions)), batch)
+                 for index in range(count) for provider in providers for arm in ('single_agent', 'three_roles')]
+        if args.skip_memory:
+            continue
+        sessions = [(rule, session, question) for rule, (_, _, qs) in enumerate(RULES)
+                    for session, question in enumerate(qs, 1)][:args.sessions]
+        for rule in sorted({item[0] for item in sessions}):
+            rule_project, rule_version = lab.project(f'模型对照-记忆{rule + 1}-b{batch}')
+            rule_scope = Scope(rule_project, FAMILY, rule_version.schema_signature)
+            memory.confirm(rule_scope, memory.propose(rule_scope, 'metric', '成交额', {
+                'definition': RULES[rule][0], 'included_statuses': RULES[rule][1]}, 'eval-trusted-preconfig').memory_id,
+                actor='trusted-eval', expected_current_id=None)
+            for item in sessions:
+                if item[0] == rule:
+                    for provider in providers:
+                        for arm in ('with_memory', 'without_memory'):
+                            jobs.append(((memory_job, (lab, provider, arm, rule, item[1], item[2], rule_project, rule_version)), batch))
+    return jobs
+
+
 def main():
     parser = argparse.ArgumentParser(description='真实模型单/三角色与有/无 Memory 对照（付费调用）')
     parser.add_argument('--providers', default='mimo,deepseek')
-    parser.add_argument('--cases', type=int, default=len(QUESTIONS), help='数值题数量，试跑时可调小')
+    parser.add_argument('--split', choices=['dev', 'heldout'], default='dev',
+                        help='dev 为调提示时用过的 20 题；heldout 为冻结的 24 道留出题（evals/heldout.py）')
+    parser.add_argument('--cases', type=int, default=None, help='数值题数量，试跑时可调小；默认取该题集全部')
+    parser.add_argument('--batches', type=int, default=1, help='重复整批评测的次数，用于估计批间方差')
+    parser.add_argument('--skip-memory', action='store_true', help='只跑单/三角色对照，不跑 Memory 会话')
     parser.add_argument('--sessions', type=int, default=8, help='记忆会话数量，最多 8')
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--output', default='model-compare.json')
     args = parser.parse_args()
     providers = [item for item in args.providers.split(',') if item]
+    questions, heldout_hash = select_questions(args.split)
+    count = len(questions) if args.cases is None else min(args.cases, len(questions))
     lab = Lab(providers)
-    project, version = lab.project('模型对照-数值')
-    memory = MemoryService(lab.memory_store)
-    scope = Scope(project, FAMILY, version.schema_signature)
-    entry = memory.confirm(scope, memory.propose(scope, 'metric', '成交额', {
-        'definition': RULES[0][0], 'included_statuses': ['paid']}, 'eval-trusted-preconfig').memory_id,
-        actor='trusted-eval', expected_current_id=None)
-    metric = memory.metric_snapshot(entry)
-    jobs = [(numeric_job, (lab, provider, arm, index, project, version, metric))
-            for index in range(args.cases) for provider in providers for arm in ('single_agent', 'three_roles')]
-    sessions = [(rule, session, question) for rule, (_, _, questions) in enumerate(RULES)
-                for session, question in enumerate(questions, 1)][:args.sessions]
-    for rule in sorted({item[0] for item in sessions}):
-        rule_project, rule_version = lab.project(f'模型对照-记忆{rule + 1}')
-        rule_scope = Scope(rule_project, FAMILY, rule_version.schema_signature)
-        memory.confirm(rule_scope, memory.propose(rule_scope, 'metric', '成交额', {
-            'definition': RULES[rule][0], 'included_statuses': RULES[rule][1]}, 'eval-trusted-preconfig').memory_id,
-            actor='trusted-eval', expected_current_id=None)
-        for item in sessions:
-            if item[0] == rule:
-                for provider in providers:
-                    for arm in ('with_memory', 'without_memory'):
-                        jobs.append((memory_job, (lab, provider, arm, rule, item[1], item[2], rule_project, rule_version)))
-    print(f'共 {len(jobs)} 个任务，并发 {args.workers}', flush=True)
+    jobs = build_jobs(args, lab, providers, questions, count)
+    print(f'共 {len(jobs)} 个任务（{args.split}，{args.batches} 批），并发 {args.workers}', flush=True)
     records, lock = [], threading.Lock()
 
-    def run(job):
-        function, arguments = job
+    def run(entry):
+        (function, arguments), batch = entry
         try:
             record = function(*arguments)
         except Exception as error:  # 单例异常不终止整批评测，记录类型而不输出细节
             record = {'experiment': 'error', 'provider': arguments[1], 'arm': arguments[2], 'error': type(error).__name__}
+        record['batch'] = batch
         with lock:
             records.append(record)
             print(len(records), record.get('experiment'), record.get('provider'), record.get('arm'),
@@ -389,7 +431,10 @@ def main():
     with ThreadPoolExecutor(args.workers) as pool:
         list(pool.map(run, jobs))
     valid = [item for item in records if item['experiment'] != 'error']
+    prompts_sha256, git_commit = code_fingerprint()
     summary = {'seed': SEED, 'date': time.strftime('%Y-%m-%d'), 'rows': 2000, 'workers': args.workers,
+               'split': args.split, 'batches': args.batches, 'heldout_sha256': heldout_hash,
+               'prompts_sha256': prompts_sha256, 'git_commit': git_commit,
                'wall_seconds': round(time.perf_counter() - started, 1),
                'models': {name: lab.config.profile(name).public() for name in providers},
                'budget': asdict(lab.budget()), 'prices_yuan_per_million': PRICES,

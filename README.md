@@ -87,7 +87,7 @@ python -B -m unittest discover -s tests/datalab -v
 npm run build --prefix frontend
 ```
 
-CI 在每次推送到 `main` 和每个 Pull Request 时运行以上三项。真实 Docker 隔离、PostgreSQL、应用集成与 Edge 浏览器流程需要本机服务，通过环境开关或独立脚本运行，见 [开发与运行](docs/development.md#测试)。
+CI 在每次推送到 `main` 和每个 Pull Request 时运行以上三项，并在独立作业中用服务容器跑真实 Docker 沙箱隔离、PostgreSQL、Celery 应用集成和固定种子评测（不调用模型）。Edge 浏览器流程需要本机运行，见 [开发与运行](docs/development.md#测试)。
 
 ## 评测结果
 

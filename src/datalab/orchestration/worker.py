@@ -107,7 +107,8 @@ def process_task(task_id: str):
                       'plan':task.plan.payload() if task.plan else None,'claims':claims,
                       'verification':[asdict(item) for item in task.verifications],
                       'narrative':derived['narrative'] if derived else None,
-                      'charts':derived['charts'] if derived else [],'derived_error':derived_error}
+                      'charts':derived['charts'] if derived else [],'derived_error':derived_error,
+                      'trace':task.trace}
             path=runner.root/latest.run_id/'report.json'
             path.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
             repository.add_artifact(task.task_id,latest.run_id,'核验报告.json',f'runs/{latest.run_id}/report.json')

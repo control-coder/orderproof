@@ -110,7 +110,10 @@ class WorkflowTests(unittest.TestCase):
         task = self.workflow.run(self.task)
         self.assertEqual(task.state, State.SUCCEEDED)
         review = self.backend.contexts[2]["handoff"]
-        self.assertEqual((review["question"], review["profile"]["dataset_family"]), ("汇总订单金额", "orders"))
+        self.assertEqual(review["question"], "汇总订单金额")
+        # 数据语义家族、结构签名属于服务端范围校验，不进入模型可见的概况。
+        self.assertNotIn("dataset_family", review["profile"])
+        self.assertEqual(review["profile"]["quality"]["row_count"], 6)
         self.assertNotIn("12345", str(review))
         self.assertNotIn("checks", review["plan"])
         self.assertNotIn("checks", self.backend.contexts[1]["handoff"]["plan"])

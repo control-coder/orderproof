@@ -84,6 +84,11 @@ class AppIntegrationTests(unittest.TestCase):
         complete=self.wait_task(task_id,{'SUCCEEDED'})
         self.assertEqual(complete['snapshot']['verifications'][-1]['reference']['total']['amount_cents'],35000)
         self.assertEqual(complete['snapshot']['budget']['tokens'],0)
+        # trace 随任务快照落库：等待确认阶段没有调用，恢复后依次是三个角色；只有字段路径与指纹，没有内容。
+        trace=complete['snapshot']['trace']
+        self.assertEqual([item['role'] for item in trace],['Planner','Analyst','Reviewer'])
+        self.assertTrue(all(item['outcome']=='ok' and len(item['handoff_sha256'])==64 for item in trace))
+        self.assertNotIn('profile.dataset_family',trace[0]['handoff_fields'])
         self.assertEqual(complete['request']['mode'],'guided-demo')
         artifact=next(item for item in complete['artifacts'] if item['name']=='结果表.csv')
         download=self.client.get(self.base+'/artifacts/'+artifact['artifact_id'])
