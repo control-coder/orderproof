@@ -1,4 +1,4 @@
-import {useEffect,useState} from 'react';
+import {useEffect,useRef,useState} from 'react';
 import type {FormEvent,ReactNode} from 'react';
 
 type Project={project_id:string;name:string};
@@ -18,7 +18,8 @@ async function api<T>(path:string,options:RequestInit={}):Promise<T>{
   if(!response.ok){throw new Error(typeof data.detail==='string'?data.detail:'输入不符合要求，请检查字段或期间');}
   return data;
 }
-const post=(data:unknown):RequestInit=>({method:'POST',body:JSON.stringify(data)});
+const post=(data:unknown,headers?:Record<string,string>):RequestInit=>({method:'POST',body:JSON.stringify(data),headers});
+const newKey=()=>crypto.randomUUID?crypto.randomUUID():Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');
 function Badge({state}:{state:string}){return <span className={'badge '+state.toLowerCase()}>{labels[state]||state}</span>;}
 function Empty({children}:{children:ReactNode}){return <div className="empty">{children}</div>;}
 
@@ -41,6 +42,7 @@ export function App(){
  const [family,setFamily]=useState('标准订单');
  const [model,setModel]=useState<ModelState|null>(null);
  const selected=datasets.find(item=>item.dataset_version===dataset);
+ const attempt=useRef<{body:string;key:string}|null>(null);
  const base='/projects/'+project;
  const confirmed=memories.filter(item=>item.status==='confirmed'&&item.kind==='metric');
  const metrics=memories.filter(item=>item.kind==='metric');
@@ -57,7 +59,10 @@ export function App(){
  async function refreshMemories(){setMemories(await api<Memory[]>(base+'/memories?dataset_version='+dataset));}
  async function createProject(event:FormEvent<HTMLFormElement>){event.preventDefault();const form=event.currentTarget;const data=new FormData(form);await action(async()=>{const item=await api<Project>('/projects',post({name:data.get('name')}));setProjects(items=>[...items,item]);setDataset('');setProject(item.project_id);form.reset();});}
  async function upload(event:FormEvent<HTMLFormElement>){event.preventDefault();const data=new FormData(event.currentTarget);const mapping:Record<string,string>={};for(const field of ['order_id','payment_time','amount','status','channel','category']){mapping[field]=String(data.get('map_'+field)||field);data.delete('map_'+field);}data.set('mapping',JSON.stringify(mapping));await action(async()=>{const item=await api<Dataset&{field_semantics_candidates:number}>(base+'/datasets',{method:'POST',body:data});setDatasets(items=>[...items,item]);setDataset(item.dataset_version);setNotice('数据版本已保存。'+(item.field_semantics_candidates?`已生成 ${item.field_semantics_candidates} 条字段语义候选，可在项目记忆页确认。`:'')+'接下来选择分析，并明确确认计算口径。');});}
- async function createTask(event:FormEvent<HTMLFormElement>){event.preventDefault();const data=new FormData(event.currentTarget);const options:Record<string,unknown>={kind,group_by:group||null};for(const field of ['start','end','previous_start','previous_end']){const value=String(data.get(field)||'');options[field]=value?(value.length===16?value+':00':value):null;}await action(async()=>{const created=await api<{task_id:string;dispatched:boolean}>(base+'/tasks',post({dataset_version:dataset,question:data.get('question'),memory_id:selectedRule||null,options}));navigate('report',created.task_id);if(!created.dispatched)setNotice('任务已存入数据库，队列恢复后会自动派发。');});}
+ async function createTask(event:FormEvent<HTMLFormElement>){event.preventDefault();const data=new FormData(event.currentTarget);const options:Record<string,unknown>={kind,group_by:group||null};for(const field of ['start','end','previous_start','previous_end']){const value=String(data.get(field)||'');options[field]=value?(value.length===16?value+':00':value):null;}const payload={dataset_version:dataset,question:data.get('question'),memory_id:selectedRule||null,options};const body=JSON.stringify(payload);
+  // 同一份请求在成功前重试（网络中断、重复点击）沿用同一个键，服务端返回原任务而不是再建一个；内容变了才换新键。
+  if(attempt.current?.body!==body)attempt.current={body,key:newKey()};const key=attempt.current.key;
+  await action(async()=>{const created=await api<{task_id:string;dispatched:boolean;replayed?:boolean}>(base+'/tasks',post(payload,{'Idempotency-Key':key}));attempt.current=null;navigate('report',created.task_id);if(created.replayed)setNotice('这份请求已提交过，已打开原任务，没有重复创建。');else if(!created.dispatched)setNotice('任务已存入数据库，队列恢复后会自动派发。');});}
  async function propose(event:FormEvent<HTMLFormElement>){event.preventDefault();const data=new FormData(event.currentTarget);await action(async()=>{await api(base+'/memories',post({dataset_version:dataset,name:data.get('name'),definition:data.get('definition'),included_statuses:data.getAll('statuses')}));await refreshMemories();setNotice('候选已保存，尚未参与计算。请检查内容后明确确认。');});}
  const reference=task?.snapshot.verifications.at(-1)?.reference;
  const charts=(task?.artifacts||[]).filter(item=>/^图表-\d+\.png$/.test(item.name)).sort((a,b)=>a.name.localeCompare(b.name));
